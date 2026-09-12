@@ -76,6 +76,10 @@ jobs:
           mkdir -p "$out/tessdata" "$out/licenses"
           echo "tools dir contents:"; ls -la "$inst/tools/tesseract"
           cp "$inst/tools/tesseract/tesseract" "$out/"
+          # Apple's linker ad-hoc signs arm64 binaries but not x86_64 ones.
+          # Sign both the same way (an ad-hoc signature, no identity), so the
+          # two builds match and the signature check below means one thing.
+          codesign --force --sign - "$out/tesseract"
           base="https://raw.githubusercontent.com/tesseract-ocr/tessdata/$TESSDATA_REF"
           curl -sfL -o "$out/tessdata/eng.traineddata" "$base/eng.traineddata"
           h=$(shasum -a 256 "$out/tessdata/eng.traineddata" | cut -c1-64)
@@ -104,8 +108,8 @@ jobs:
           # Everything past the first line must live in /usr/lib or /System.
           bad=$(otool -L "$exe" | tail -n +2 | awk '{print $1}' | grep -v -E '^(/usr/lib/|/System/)' || true)
           [ -z "$bad" ] || { echo "non-system library dependency: $bad"; exit 1; }
-          # Apple Silicon refuses to run unsigned code; the linker's ad-hoc
-          # signature is enough for a binary pdf-mcp downloads itself.
+          # Apple Silicon refuses to run unsigned code; an ad-hoc signature
+          # is enough for a binary pdf-mcp downloads itself.
           codesign -v --verbose=2 "$exe"
 
       - name: Smoke test with a bare PATH
