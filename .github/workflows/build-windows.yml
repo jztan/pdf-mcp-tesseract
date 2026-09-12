@@ -1,0 +1,293 @@
+# Spike gate: does a static tesseract.exe built from unmodified upstream
+# source via vcpkg compile, run with no DLLs beside it, pass pdf-mcp's OCR
+# tests, and read the same words as the official Windows build?
+name: build-windows
+
+on:
+  push:
+    # Branches only: a release tag runs these through release.yml instead.
+    branches: ['**']
+    # Prose cannot change the binary.
+    paths-ignore: ['README.md', 'LICENSE']
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch cancels the older run. github.workflow is
+# the caller's name when release.yml calls this, so a release or dry run
+# never shares a group with (or is cancelled by) a branch build.
+concurrency:
+  group: ${{ github.workflow }}-windows-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' && github.ref_type == 'branch' }}
+
+env:
+  # Pinning the vcpkg commit pins every port: Tesseract (5.5.2 at this
+  # commit), Leptonica, and all of their dependencies.
+  VCPKG_COMMIT: 9e593bb18ea69cc5095e012465dcd675a822ed0d # tag 2026.07.29
+  TRIPLET: x64-windows-static-release
+  # Standard tessdata (LSTM + legacy), the model the UB Mannheim installer
+  # ships. tessdata_fast eng is 4.1 MB against 23.5 MB; not chosen here.
+  TESSDATA_REF: "4.1.0"
+  ENG_SHA256: daa0c97d651c19fba3b25e81317cd697e9908c8208090c94c3905381c23fc047
+  PDF_MCP_REF: develop
+  ZIP_NAME: pdf-mcp-tesseract-win-x64.zip
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 150
+    env:
+      VCPKG_DISABLE_METRICS: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Fetch vcpkg at the pinned commit
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "vcpkg"
+          git init -q $root
+          git -C $root fetch -q --depth 1 https://github.com/microsoft/vcpkg.git $env:VCPKG_COMMIT
+          git -C $root checkout -q FETCH_HEAD
+          & "$root\bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          "VCPKG_ROOT=$root" >> $env:GITHUB_ENV
+          "VCPKG_BINARY_SOURCES=clear;files,$env:RUNNER_TEMP\vcpkg-archives,readwrite" >> $env:GITHUB_ENV
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\vcpkg-archives" | Out-Null
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\vcpkg-archives
+          key: vcpkg-${{ env.VCPKG_COMMIT }}-${{ env.TRIPLET }}-${{ hashFiles('triplets/x64-windows-static-release.cmake', 'ports/**') }}
+
+      - name: Build Tesseract (static)
+        shell: pwsh
+        run: |
+          $start = Get-Date
+          # ports/tesseract overlays the stock port: same source and patches,
+          # built without curl and libarchive (see its portfile).
+          & "$env:VCPKG_ROOT\vcpkg.exe" install "tesseract:$env:TRIPLET" `
+            --overlay-triplets=triplets --overlay-ports=ports --clean-after-build
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $mins = [math]::Round(((Get-Date) - $start).TotalMinutes, 1)
+          "Build step: $mins min" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload vcpkg build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vcpkg-logs
+          path: ${{ env.VCPKG_ROOT }}/buildtrees/**/*.log
+          if-no-files-found: ignore
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $inst = "$env:VCPKG_ROOT\installed\$env:TRIPLET"
+          $out = "dist\tesseract"
+          New-Item -ItemType Directory -Force "$out\tessdata", "$out\licenses" | Out-Null
+
+          "tools dir contents:"; Get-ChildItem "$inst\tools\tesseract" | Format-Table Name, Length
+          Copy-Item "$inst\tools\tesseract\tesseract.exe" $out
+
+          $base = "https://raw.githubusercontent.com/tesseract-ocr/tessdata/$env:TESSDATA_REF"
+          Invoke-WebRequest "$base/eng.traineddata" -OutFile "$out\tessdata\eng.traineddata"
+          $h = (Get-FileHash "$out\tessdata\eng.traineddata" -Algorithm SHA256).Hash.ToLower()
+          if ($h -ne $env:ENG_SHA256) { throw "eng.traineddata sha256 $h != pinned $env:ENG_SHA256" }
+          Invoke-WebRequest "$base/LICENSE" -OutFile "$out\licenses\tessdata.txt"
+
+          # One notice per statically linked port (Tesseract Apache-2.0,
+          # Leptonica BSD-2, and every image/compression library under them).
+          Get-ChildItem "$inst\share" -Directory | ForEach-Object {
+            $c = Join-Path $_.FullName "copyright"
+            if (Test-Path $c) { Copy-Item $c "$out\licenses\$($_.Name).txt" }
+          }
+
+          & "$env:VCPKG_ROOT\vcpkg.exe" list | Out-File "$out\PORTS.txt" -Encoding utf8
+          @(
+            "Built from unmodified upstream source by https://github.com/$env:GITHUB_REPOSITORY"
+            "Workflow run: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            "Commit: $env:GITHUB_SHA"
+            "vcpkg: $env:VCPKG_COMMIT"
+            "Triplet: $env:TRIPLET"
+            "tessdata: tesseract-ocr/tessdata@$env:TESSDATA_REF eng.traineddata sha256 $env:ENG_SHA256"
+          ) | Out-File "$out\BUILDINFO.txt" -Encoding utf8
+          Get-Content "$out\PORTS.txt"
+          # THIRD-PARTY-NOTICES.md; fails on a linked port with no licence text
+          # or an unreviewed licence.
+          python scripts/third_party_notices.py $out
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Verify the exe needs only Windows system DLLs
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe |
+            Where-Object FullName -like "*Hostx64\x64*" | Select-Object -First 1
+          $deps = & $dumpbin.FullName /nologo /dependents dist\tesseract\tesseract.exe |
+            Where-Object { $_ -match '^\s+\S+\.dll\s*$' } | ForEach-Object { $_.Trim() }
+          "Dependents:"; $deps
+          # The runner has the VC++ redistributable in System32, so "exists
+          # in System32" alone would pass a dynamic-CRT build. Reject the CRT
+          # by name, then anything else not shipped with Windows.
+          $crt = $deps | Where-Object { $_ -match '^(vcruntime|msvcp|concrt|vcomp|api-ms-win-crt)' }
+          if ($crt) { throw "dynamic CRT dependency: $crt" }
+          $missing = $deps | Where-Object { -not (Test-Path "$env:SystemRoot\System32\$_") }
+          if ($missing) { throw "non-system DLL dependency: $missing" }
+
+      - name: Smoke test with a bare PATH and no TESSDATA_PREFIX
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          Remove-Item Env:TESSDATA_PREFIX -ErrorAction SilentlyContinue
+          $exe = Resolve-Path dist\tesseract\tesseract.exe
+          $version = & $exe --version 2>&1
+          $version
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # The overlay port must have dropped these; if they reappear, the
+          # overlay is not being used.
+          if ($version -match 'libarchive|libcurl') { throw "exe still links libarchive or libcurl" }
+          # No --tessdata-dir: proves Tesseract finds tessdata\ beside the
+          # exe, which is how pdf-mcp's _resolve_tessdata() discovers it.
+          $langs = & $exe --list-langs 2>&1
+          $langs
+          if (-not ($langs -match '^eng$')) { throw "eng not listed from exe-adjacent tessdata" }
+
+      - name: Zip and hash
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\tesseract\* -DestinationPath "dist\$env:ZIP_NAME"
+          $h = (Get-FileHash "dist\$env:ZIP_NAME" -Algorithm SHA256).Hash.ToLower()
+          "$h  $env:ZIP_NAME" | Out-File "dist\$env:ZIP_NAME.sha256" -Encoding ascii
+          $exeMb = [math]::Round((Get-Item dist\tesseract\tesseract.exe).Length / 1MB, 1)
+          $zipMb = [math]::Round((Get-Item "dist\$env:ZIP_NAME").Length / 1MB, 1)
+          @(
+            "## Artifact"
+            ""
+            "| file | size |"
+            "|---|---|"
+            "| tesseract.exe | $exeMb MB |"
+            "| $env:ZIP_NAME | $zipMb MB |"
+            ""
+            "sha256 ``$h``"
+          ) >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Scan the package with Microsoft Defender
+        # An unsigned exe downloaded by a background process is the case most
+        # likely to trip Defender's heuristics on users' machines. Update the
+        # signatures, scan the unpacked package and the zip, fail on a find.
+        shell: pwsh
+        run: |
+          $mp = Join-Path $env:ProgramFiles "Windows Defender\MpCmdRun.exe"
+          if (-not (Test-Path $mp)) { throw "Defender command line not found at $mp" }
+          Get-MpComputerStatus | Format-List AMServiceEnabled, AntivirusEnabled, AntivirusSignatureVersion, AMEngineVersion
+          & $mp -SignatureUpdate | Out-Host
+          $status = Get-MpComputerStatus
+          $results = @()
+          foreach ($target in @((Resolve-Path dist\tesseract).Path, (Resolve-Path "dist\$env:ZIP_NAME").Path)) {
+            & $mp -Scan -ScanType 3 -File $target -DisableRemediation | Out-Host
+            $code = $LASTEXITCODE
+            $results += "| ``$(Split-Path $target -Leaf)`` | $code |"
+            # MpCmdRun: 0 = no threat found, 2 = threat found, anything else = scan error.
+            if ($code -eq 2) { throw "Defender flagged $target" }
+            if ($code -ne 0) { throw "Defender scan of $target failed (exit $code)" }
+          }
+          @(
+            "## Defender scan"
+            ""
+            "Signatures $($status.AntivirusSignatureVersion), engine $($status.AMEngineVersion)"
+            ""
+            "| target | MpCmdRun exit (0 = clean) |"
+            "|---|---|"
+          ) + $results >> $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: win-x64
+          path: dist/${{ env.ZIP_NAME }}*
+          if-no-files-found: error
+
+  pdf-mcp-ocr-tests:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jztan/pdf-mcp
+          ref: ${{ env.PDF_MCP_REF }}
+          path: pdf-mcp
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: win-x64
+          path: artifact
+
+      - name: Unpack and put our Tesseract on PATH
+        shell: pwsh
+        run: |
+          Expand-Archive "artifact\$env:ZIP_NAME" -DestinationPath C:\pdf-mcp-tesseract
+          "C:\pdf-mcp-tesseract" >> $env:GITHUB_PATH
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "latest"
+      - name: Install pdf-mcp
+        working-directory: pdf-mcp
+        run: uv sync --frozen --extra dev
+
+      - name: Verify the tests will see OUR tesseract
+        shell: pwsh
+        run: |
+          $src = (Get-Command tesseract).Source
+          "tesseract resolves to $src"
+          if ($src -ne "C:\pdf-mcp-tesseract\tesseract.exe") { throw "wrong tesseract on PATH" }
+
+      - name: Run pdf-mcp OCR tests
+        working-directory: pdf-mcp
+        run: >
+          uv run pytest
+          tests/test_integration.py tests/backend/test_raster.py tests/test_pdf_reader.py
+          -k "ocr or tesseract or tessdata" -v -rs
+          --junitxml=${{ github.workspace }}/ocr-results.xml
+
+      - name: Fail if the OCR tests skipped instead of running
+        if: always()
+        run: python scripts/assert_ocr_ran.py ocr-results.xml
+
+  parity:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jztan/pdf-mcp
+          ref: ${{ env.PDF_MCP_REF }}
+          path: pdf-mcp
+          sparse-checkout: pages/corpus
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: win-x64
+          path: artifact
+      - name: Unpack ours
+        shell: pwsh
+        run: Expand-Archive "artifact\$env:ZIP_NAME" -DestinationPath C:\pdf-mcp-tesseract
+      - name: Install the official Windows build (UB Mannheim, via choco) as reference
+        run: choco install --no-progress -y tesseract
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "latest"
+      - name: Compare words and speed on the same traineddata
+        run: >
+          uv run scripts/parity.py
+          --pdf pdf-mcp/pages/corpus/gao-cloud.pdf --pages 3,4,5
+          --ours C:/pdf-mcp-tesseract/tesseract.exe
+          --ref "C:/Program Files/Tesseract-OCR/tesseract.exe"
+          --tessdata C:/pdf-mcp-tesseract/tessdata
