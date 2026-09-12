@@ -5,7 +5,10 @@ name: build-windows
 
 on:
   push:
+    # Branches only: a release tag runs these through release.yml instead.
+    branches: ['**']
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

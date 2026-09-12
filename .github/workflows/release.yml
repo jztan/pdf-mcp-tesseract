@@ -1,0 +1,88 @@
+# Publishes a release when a tesseract-* tag is pushed (git-flow: tag on
+# master after the release branch merges). Both build workflows run in this
+# same run with all their gates, so the zips attached are the ones that just
+# passed; each is hash-checked and gets a build-provenance attestation.
+name: release
+
+on:
+  push:
+    tags: ['tesseract-*']
+  # Dry run: builds, hash checks and writes the notes, but attests and
+  # publishes nothing (an attestation is a public record).
+  workflow_dispatch:
+
+permissions:
+  contents: write      # create the release
+  id-token: write      # sign the provenance attestation
+  attestations: write
+
+jobs:
+  windows:
+    uses: ./.github/workflows/build-windows.yml
+  macos:
+    uses: ./.github/workflows/build-macos.yml
+
+  publish:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: '{win-x64,macos-arm64,macos-x64}'
+          merge-multiple: true
+          path: dist
+
+      - name: Check every zip against its recorded hash
+        working-directory: dist
+        run: |
+          ls -la
+          test "$(ls *.zip | wc -l)" -eq 3
+          for z in *.zip; do
+            # Compare the hash itself: the Windows .sha256 is written by
+            # PowerShell and may end in CRLF, which sha256sum -c rejects.
+            expected=$(tr -d '\r' < "$z.sha256" | cut -c1-64)
+            actual=$(sha256sum "$z" | cut -c1-64)
+            [ "$expected" = "$actual" ] || { echo "$z: $actual != recorded $expected"; exit 1; }
+            printf '%s  %s\n' "$actual" "$z" > "$z.sha256"   # normalise to LF
+          done
+          sha256sum *.zip > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attest build provenance
+        if: startsWith(github.ref, 'refs/tags/tesseract-')
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.zip
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          {
+            echo "Static Tesseract OCR built from unmodified upstream source (Tesseract 5.5.2, Leptonica 1.87.0) at vcpkg 2026.07.29, without curl, libarchive or OpenSSL, with English language data (tessdata 4.1.0)."
+            echo ""
+            echo "Used by [pdf-mcp](https://github.com/jztan/pdf-mcp) for zero-install OCR: it downloads the zip for your platform, checks its SHA-256 against a value pinned in pdf-mcp, and never replaces a Tesseract you installed yourself."
+            echo ""
+            echo "| platform | file | size | sha256 |"
+            echo "|---|---|---|---|"
+            for z in dist/*.zip; do
+              f=$(basename "$z")
+              plat=${f#pdf-mcp-tesseract-}; plat=${plat%.zip}
+              echo "| $plat | \`$f\` | $(( $(stat -c%s "$z") / 1048576 )) MB | \`$(cut -c1-64 "$z.sha256")\` |"
+            done
+            echo ""
+            echo "Every zip passed, in this run: a self-contained check (system libraries only), pdf-mcp's OCR tests with no Tesseract-related skips, and word parity with a reference build (UB Mannheim on Windows, Homebrew on macOS). The Windows package was also scanned by Microsoft Defender. Each zip carries THIRD-PARTY-NOTICES.md and the licence texts."
+            echo ""
+            echo "Verify a download came from this repository's CI:"
+            echo ""
+            echo "\`\`\`"
+            echo "gh attestation verify pdf-mcp-tesseract-<platform>.zip --repo $GITHUB_REPOSITORY"
+            echo "\`\`\`"
+            echo ""
+            echo "Build run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > notes.md
+          cat notes.md
+          if [ "$GITHUB_REF_TYPE" != tag ]; then echo "dry run: not publishing"; exit 0; fi
+          gh release create "$tag" dist/*.zip dist/*.zip.sha256 dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --title "$tag" --notes-file notes.md --verify-tag
