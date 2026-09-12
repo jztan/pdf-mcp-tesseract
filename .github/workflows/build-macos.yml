@@ -7,7 +7,7 @@ on:
   push:
     # Branches only: a release tag runs these through release.yml instead.
     branches: ['**']
-    # Prose cannot change a binary.
+    # Prose cannot change the binary.
     paths-ignore: ['README.md', 'LICENSE']
   workflow_dispatch:
   workflow_call:
