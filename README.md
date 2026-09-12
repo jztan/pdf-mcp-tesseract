@@ -39,6 +39,9 @@ macOS)? No release has been published yet.
 
 The build scripts in this repo are MIT. The packaged binary is Tesseract
 (Apache-2.0) statically linked with Leptonica (BSD-2-Clause) and its image
-and compression libraries; every notice ships in the zip under `licenses/`,
-and `eng.traineddata` is Apache-2.0 from
-[tesseract-ocr/tessdata](https://github.com/tesseract-ocr/tessdata).
+and compression libraries. Each zip carries `THIRD-PARTY-NOTICES.md` (every
+linked library, its version and licence, and the attribution the IJG licence
+requires) and the full licence texts under `licenses/`; `eng.traineddata` is
+Apache-2.0 from [tesseract-ocr/tessdata](https://github.com/tesseract-ocr/tessdata).
+The build fails if a linked library has no licence text or a licence that
+`scripts/third_party_notices.py` has not been reviewed for.

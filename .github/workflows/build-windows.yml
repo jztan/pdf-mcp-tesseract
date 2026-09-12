@@ -103,6 +103,10 @@ jobs:
             "tessdata: tesseract-ocr/tessdata@$env:TESSDATA_REF eng.traineddata sha256 $env:ENG_SHA256"
           ) | Out-File "$out\BUILDINFO.txt" -Encoding utf8
           Get-Content "$out\PORTS.txt"
+          # THIRD-PARTY-NOTICES.md; fails on a linked port with no licence text
+          # or an unreviewed licence.
+          python scripts/third_party_notices.py $out
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Verify the exe needs only Windows system DLLs
         shell: pwsh

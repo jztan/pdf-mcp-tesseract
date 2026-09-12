@@ -99,6 +99,9 @@ jobs:
             echo "tessdata: tesseract-ocr/tessdata@$TESSDATA_REF eng.traineddata sha256 $ENG_SHA256"
           } > "$out/BUILDINFO.txt"
           cat "$out/PORTS.txt"
+          # THIRD-PARTY-NOTICES.md; fails on a linked port with no licence text
+          # or an unreviewed licence.
+          python3 scripts/third_party_notices.py "$out"
 
       - name: Verify the binary links only system libraries and is signed
         run: |
