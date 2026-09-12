@@ -19,7 +19,9 @@ No release has been published yet.
 ## What the workflow checks
 
 1. **Build:** `vcpkg install tesseract:x64-windows-static-release` at the
-   pinned vcpkg commit (static libraries, static CRT, release only).
+   pinned vcpkg commit (static libraries, static CRT, release only), using
+   the overlay in `ports/tesseract`: the stock port built without curl and
+   libarchive, which pdf-mcp never reaches (it hands Tesseract image files).
 2. **Self-contained:** `dumpbin /dependents` must list only Windows system
    DLLs, with the Visual C++ runtime rejected by name.
 3. **Smoke:** `--version` and `--list-langs` with a bare `PATH` and no
@@ -28,6 +30,8 @@ No release has been published yet.
    and fail if any of them skips instead of running.
 5. **Parity:** the same pages OCRed by this exe and by the UB Mannheim build,
    on the same traineddata: word-set Jaccard and wall-clock ratio.
+6. **Defender:** Microsoft Defender, with freshly updated signatures, scans
+   the unpacked package and the zip; any detection fails the build.
 
 ## Licences
 
