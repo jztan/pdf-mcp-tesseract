@@ -1,7 +1,8 @@
 # pdf-mcp-tesseract
 
 Static [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) builds for
-[pdf-mcp](https://github.com/jztan/pdf-mcp)'s zero-install OCR fallback.
+[pdf-mcp](https://github.com/jztan/pdf-mcp)'s zero-install OCR fallback:
+Windows x64, macOS Apple Silicon and macOS Intel, one zip per platform.
 
 This repo holds no Tesseract source. It pins a
 [vcpkg](https://github.com/microsoft/vcpkg) commit, builds upstream Tesseract
@@ -11,10 +12,11 @@ Tesseract you installed yourself always takes precedence in pdf-mcp.
 
 ## Status
 
-Spike. The Windows build workflow answers one question before anything
-ships: does the static build compile, run with no DLLs beside it, pass
-pdf-mcp's OCR tests, and read the same words as the official Windows build?
-No release has been published yet.
+Spike. `build-windows.yml` and `build-macos.yml` answer one question per
+platform before anything ships: does the static build compile, run with
+nothing beside it but its tessdata, pass pdf-mcp's OCR tests, and read the
+same words as a reference build (UB Mannheim on Windows, Homebrew on
+macOS)? No release has been published yet.
 
 ## What the workflow checks
 

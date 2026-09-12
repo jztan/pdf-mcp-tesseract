@@ -48,7 +48,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}\vcpkg-archives
-          key: vcpkg-${{ env.VCPKG_COMMIT }}-${{ env.TRIPLET }}-${{ hashFiles('triplets/**', 'ports/**') }}
+          key: vcpkg-${{ env.VCPKG_COMMIT }}-${{ env.TRIPLET }}-${{ hashFiles('triplets/x64-windows-static-release.cmake', 'ports/**') }}
 
       - name: Build Tesseract (static)
         shell: pwsh
