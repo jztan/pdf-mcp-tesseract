@@ -19,8 +19,10 @@ def main(path: str) -> int:
         if case.find("failure") is not None or case.find("error") is not None:
             failed.append(name)
         elif skipped is not None:
-            reason = (skipped.get("message") or "") + (skipped.text or "")
-            if "esseract" in reason:
+            # The message attribute only: the element text carries the test
+            # file path, and this repo's checkout path contains "tesseract".
+            reason = skipped.get("message") or ""
+            if "tesseract not installed" in reason.lower():
                 bad_skips.append(f"{name}: {reason.strip()}")
             else:
                 print(f"skipped (unrelated): {name}: {reason.strip()}")

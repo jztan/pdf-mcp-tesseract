@@ -47,7 +47,11 @@ def ocr(exe: str, image: Path, tessdata: str) -> tuple[str, float]:
     env.pop("TESSDATA_PREFIX", None)
     cmd = [exe, str(image), "stdout", "-l", "eng", "--tessdata-dir", tessdata]
     start = time.perf_counter()
-    done = subprocess.run(cmd, capture_output=True, text=True, env=env, check=True)
+    # Tesseract writes UTF-8; without an explicit encoding Windows decodes
+    # it as cp1252 and the reader thread dies on the first curly quote.
+    done = subprocess.run(
+        cmd, capture_output=True, encoding="utf-8", env=env, check=True
+    )
     return done.stdout, time.perf_counter() - start
 
 
@@ -66,7 +70,9 @@ def main() -> int:
     args = ap.parse_args()
 
     for exe in (args.ours, args.ref):
-        version = subprocess.run([exe, "--version"], capture_output=True, text=True)
+        version = subprocess.run(
+            [exe, "--version"], capture_output=True, encoding="utf-8"
+        )
         print(f"{exe}: {(version.stdout or version.stderr).splitlines()[0]}")
 
     pages = [int(p) for p in args.pages.split(",")]
