@@ -7,11 +7,20 @@ on:
   push:
     # Branches only: a release tag runs these through release.yml instead.
     branches: ['**']
+    # Prose cannot change a binary.
+    paths-ignore: ['README.md', 'LICENSE']
   workflow_dispatch:
   workflow_call:
 
 permissions:
   contents: read
+
+# A newer push to the same branch cancels the older run. github.workflow is
+# the caller's name when release.yml calls this, so a release or dry run
+# never shares a group with (or is cancelled by) a branch build.
+concurrency:
+  group: ${{ github.workflow }}-macos-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' && github.ref_type == 'branch' }}
 
 env:
   VCPKG_COMMIT: 9e593bb18ea69cc5095e012465dcd675a822ed0d # tag 2026.07.29
