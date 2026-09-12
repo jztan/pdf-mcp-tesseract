@@ -19,6 +19,17 @@ rebuilds all three zips with every check, compares their hashes, attests
 their build provenance and publishes them. pdf-mcp pins each zip's SHA-256.
 Running `release.yml` by hand is a dry run that publishes nothing.
 
+To release, from a clean `develop` whose builds are green:
+
+```
+python3 scripts/release.py --dry-run   # the plan, nothing changed
+python3 scripts/release.py             # asks, then releases
+```
+
+It picks the next tag, checks everything before changing anything, rolls
+back on any failure, and pushes `master`, `develop` and the tag in one
+atomic push.
+
 ## What the workflows check
 
 `build-windows.yml` and `build-macos.yml` run on every branch push and again
