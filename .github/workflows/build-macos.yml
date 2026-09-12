@@ -1,0 +1,259 @@
+# macOS builds of the same pinned, unmodified Tesseract as build-windows.yml,
+# with the same gates: self-contained binary, pdf-mcp's OCR tests, and word
+# parity with a reference build (Homebrew's) on the same traineddata.
+name: build-macos
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  VCPKG_COMMIT: 9e593bb18ea69cc5095e012465dcd675a822ed0d # tag 2026.07.29
+  TESSDATA_REF: "4.1.0"
+  ENG_SHA256: daa0c97d651c19fba3b25e81317cd697e9908c8208090c94c3905381c23fc047
+  PDF_MCP_REF: develop
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest       # Apple Silicon
+            triplet: arm64-osx-release
+            asset: macos-arm64
+          - runner: macos-15-intel     # Intel
+            triplet: x64-osx-release
+            asset: macos-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    env:
+      VCPKG_DISABLE_METRICS: "1"
+      TRIPLET: ${{ matrix.triplet }}
+      ZIP_NAME: pdf-mcp-tesseract-${{ matrix.asset }}.zip
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Fetch vcpkg at the pinned commit
+        run: |
+          root="$RUNNER_TEMP/vcpkg"
+          git init -q "$root"
+          git -C "$root" fetch -q --depth 1 https://github.com/microsoft/vcpkg.git "$VCPKG_COMMIT"
+          git -C "$root" checkout -q FETCH_HEAD
+          "$root/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=$root" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/vcpkg-archives"
+          echo "VCPKG_BINARY_SOURCES=clear;files,$RUNNER_TEMP/vcpkg-archives,readwrite" >> "$GITHUB_ENV"
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/vcpkg-archives
+          key: vcpkg-${{ env.VCPKG_COMMIT }}-${{ matrix.triplet }}-${{ hashFiles(format('triplets/{0}.cmake', matrix.triplet), 'ports/**') }}
+
+      - name: Build Tesseract (static)
+        run: |
+          start=$(date +%s)
+          "$VCPKG_ROOT/vcpkg" install "tesseract:$TRIPLET" \
+            --overlay-triplets=triplets --overlay-ports=ports --clean-after-build
+          echo "Build step: $(( ($(date +%s) - start) / 60 )) min" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload vcpkg build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vcpkg-logs-${{ matrix.asset }}
+          path: ${{ env.VCPKG_ROOT }}/buildtrees/**/*.log
+          if-no-files-found: ignore
+
+      - name: Package
+        run: |
+          inst="$VCPKG_ROOT/installed/$TRIPLET"
+          out=dist/tesseract
+          mkdir -p "$out/tessdata" "$out/licenses"
+          echo "tools dir contents:"; ls -la "$inst/tools/tesseract"
+          cp "$inst/tools/tesseract/tesseract" "$out/"
+          # Apple's linker ad-hoc signs arm64 binaries but not x86_64 ones.
+          # Sign both the same way (an ad-hoc signature, no identity), so the
+          # two builds match and the signature check below means one thing.
+          codesign --force --sign - "$out/tesseract"
+          base="https://raw.githubusercontent.com/tesseract-ocr/tessdata/$TESSDATA_REF"
+          curl -sfL -o "$out/tessdata/eng.traineddata" "$base/eng.traineddata"
+          h=$(shasum -a 256 "$out/tessdata/eng.traineddata" | cut -c1-64)
+          [ "$h" = "$ENG_SHA256" ] || { echo "eng.traineddata sha256 $h != pinned $ENG_SHA256"; exit 1; }
+          curl -sfL -o "$out/licenses/tessdata.txt" "$base/LICENSE"
+          for d in "$inst"/share/*/; do
+            n=$(basename "$d")
+            [ -f "$d/copyright" ] && cp "$d/copyright" "$out/licenses/$n.txt"
+          done
+          "$VCPKG_ROOT/vcpkg" list > "$out/PORTS.txt"
+          {
+            echo "Built from unmodified upstream source by https://github.com/$GITHUB_REPOSITORY"
+            echo "Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "Commit: $GITHUB_SHA"
+            echo "vcpkg: $VCPKG_COMMIT"
+            echo "Triplet: $TRIPLET"
+            echo "tessdata: tesseract-ocr/tessdata@$TESSDATA_REF eng.traineddata sha256 $ENG_SHA256"
+          } > "$out/BUILDINFO.txt"
+          cat "$out/PORTS.txt"
+          # THIRD-PARTY-NOTICES.md; fails on a linked port with no licence text
+          # or an unreviewed licence.
+          python3 scripts/third_party_notices.py "$out"
+
+      - name: Verify the binary links only system libraries and is signed
+        run: |
+          exe=dist/tesseract/tesseract
+          file "$exe"
+          echo "Linked libraries:"; otool -L "$exe"
+          # Everything past the first line must live in /usr/lib or /System.
+          bad=$(otool -L "$exe" | tail -n +2 | awk '{print $1}' | grep -v -E '^(/usr/lib/|/System/)' || true)
+          [ -z "$bad" ] || { echo "non-system library dependency: $bad"; exit 1; }
+          # Apple Silicon refuses to run unsigned code; an ad-hoc signature
+          # is enough for a binary pdf-mcp downloads itself.
+          codesign -v --verbose=2 "$exe"
+
+      - name: Smoke test with a bare PATH
+        run: |
+          exe="$PWD/dist/tesseract/tesseract"
+          version=$(env -i PATH=/usr/bin:/bin "$exe" --version 2>&1)
+          echo "$version"
+          if echo "$version" | grep -E -q 'libarchive|libcurl'; then echo "binary still links libarchive or libcurl"; exit 1; fi
+          # On macOS Tesseract does not look beside itself for tessdata (that is
+          # Windows-only); pdf-mcp passes the folder, so the smoke does too.
+          langs=$(env -i PATH=/usr/bin:/bin "$exe" --list-langs --tessdata-dir "$PWD/dist/tesseract/tessdata" 2>&1)
+          echo "$langs"
+          echo "$langs" | grep -x -q eng || { echo "eng not listed"; exit 1; }
+
+      - name: Zip and hash
+        run: |
+          (cd dist/tesseract && zip -q -r "../$ZIP_NAME" .)
+          h=$(shasum -a 256 "dist/$ZIP_NAME" | cut -c1-64)
+          echo "$h  $ZIP_NAME" > "dist/$ZIP_NAME.sha256"
+          {
+            echo "## Artifact ($TRIPLET)"
+            echo ""
+            echo "| file | size |"
+            echo "|---|---|"
+            echo "| tesseract | $(( $(stat -f%z dist/tesseract/tesseract) / 1048576 )) MB |"
+            echo "| $ZIP_NAME | $(( $(stat -f%z "dist/$ZIP_NAME") / 1048576 )) MB |"
+            echo ""
+            echo "sha256 \`$h\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ env.ZIP_NAME }}*
+          if-no-files-found: error
+
+  pdf-mcp-ocr-tests:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            asset: macos-arm64
+          - runner: macos-15-intel
+            asset: macos-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jztan/pdf-mcp
+          ref: ${{ env.PDF_MCP_REF }}
+          path: pdf-mcp
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ matrix.asset }}
+          path: artifact
+      - name: Unpack and put our Tesseract on PATH
+        run: |
+          mkdir -p "$RUNNER_TEMP/pdf-mcp-tesseract"
+          unzip -q "artifact/pdf-mcp-tesseract-${{ matrix.asset }}.zip" -d "$RUNNER_TEMP/pdf-mcp-tesseract"
+          chmod +x "$RUNNER_TEMP/pdf-mcp-tesseract/tesseract"
+          echo "$RUNNER_TEMP/pdf-mcp-tesseract" >> "$GITHUB_PATH"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "latest"
+      - name: Install pdf-mcp
+        working-directory: pdf-mcp
+        run: uv sync --frozen --extra dev
+      - name: Verify the tests will see OUR tesseract
+        run: |
+          src=$(command -v tesseract)
+          echo "tesseract resolves to $src"
+          [ "$src" = "$RUNNER_TEMP/pdf-mcp-tesseract/tesseract" ] || { echo "wrong tesseract on PATH"; exit 1; }
+      - name: pdf-mcp finds the tessdata beside the binary on its own
+        # Tesseract on macOS reports its compile-time tessdata path, which does
+        # not exist on a user's machine; pdf-mcp falls back to the folder next
+        # to the binary. Prove that with no TESSDATA_PREFIX set.
+        working-directory: pdf-mcp
+        run: |
+          got=$(env -u TESSDATA_PREFIX uv run python -c "from pdf_mcp.extractor import _resolve_tessdata; print(_resolve_tessdata())")
+          echo "resolved tessdata: $got"
+          [ "$got" = "$RUNNER_TEMP/pdf-mcp-tesseract/tessdata" ] || { echo "pdf-mcp did not find the bundled tessdata"; exit 1; }
+      - name: Run pdf-mcp OCR tests
+        # TESSDATA_PREFIX only for PyMuPDF's reference OCR in one test, which
+        # asks the binary for its (compile-time) tessdata path.
+        working-directory: pdf-mcp
+        env:
+          TESSDATA_PREFIX: ${{ runner.temp }}/pdf-mcp-tesseract/tessdata
+        run: >
+          uv run pytest
+          tests/test_integration.py tests/backend/test_raster.py tests/test_pdf_reader.py
+          -k "ocr or tesseract or tessdata" -v -rs
+          --junitxml=${{ github.workspace }}/ocr-results.xml
+      - name: Fail if the OCR tests skipped instead of running
+        if: always()
+        run: python scripts/assert_ocr_ran.py ocr-results.xml
+
+  parity:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            asset: macos-arm64
+          - runner: macos-15-intel
+            asset: macos-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jztan/pdf-mcp
+          ref: ${{ env.PDF_MCP_REF }}
+          path: pdf-mcp
+          sparse-checkout: pages/corpus
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ matrix.asset }}
+          path: artifact
+      - name: Unpack ours
+        run: |
+          mkdir -p "$RUNNER_TEMP/ours"
+          unzip -q "artifact/pdf-mcp-tesseract-${{ matrix.asset }}.zip" -d "$RUNNER_TEMP/ours"
+          chmod +x "$RUNNER_TEMP/ours/tesseract"
+      - name: Install Homebrew's Tesseract as the reference
+        run: brew install tesseract
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "latest"
+      - name: Compare words and speed on the same traineddata
+        run: >
+          uv run scripts/parity.py
+          --pdf pdf-mcp/pages/corpus/gao-cloud.pdf --pages 3,4,5
+          --ours "$RUNNER_TEMP/ours/tesseract"
+          --ref "$(brew --prefix)/bin/tesseract"
+          --tessdata "$RUNNER_TEMP/ours/tessdata"

@@ -48,14 +48,16 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}\vcpkg-archives
-          key: vcpkg-${{ env.VCPKG_COMMIT }}-${{ env.TRIPLET }}-${{ hashFiles('triplets/**') }}
+          key: vcpkg-${{ env.VCPKG_COMMIT }}-${{ env.TRIPLET }}-${{ hashFiles('triplets/x64-windows-static-release.cmake', 'ports/**') }}
 
       - name: Build Tesseract (static)
         shell: pwsh
         run: |
           $start = Get-Date
+          # ports/tesseract overlays the stock port: same source and patches,
+          # built without curl and libarchive (see its portfile).
           & "$env:VCPKG_ROOT\vcpkg.exe" install "tesseract:$env:TRIPLET" `
-            --overlay-triplets=triplets --clean-after-build
+            --overlay-triplets=triplets --overlay-ports=ports --clean-after-build
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           $mins = [math]::Round(((Get-Date) - $start).TotalMinutes, 1)
           "Build step: $mins min" >> $env:GITHUB_STEP_SUMMARY
@@ -101,6 +103,10 @@ jobs:
             "tessdata: tesseract-ocr/tessdata@$env:TESSDATA_REF eng.traineddata sha256 $env:ENG_SHA256"
           ) | Out-File "$out\BUILDINFO.txt" -Encoding utf8
           Get-Content "$out\PORTS.txt"
+          # THIRD-PARTY-NOTICES.md; fails on a linked port with no licence text
+          # or an unreviewed licence.
+          python scripts/third_party_notices.py $out
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Verify the exe needs only Windows system DLLs
         shell: pwsh
@@ -125,8 +131,12 @@ jobs:
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
           Remove-Item Env:TESSDATA_PREFIX -ErrorAction SilentlyContinue
           $exe = Resolve-Path dist\tesseract\tesseract.exe
-          & $exe --version
+          $version = & $exe --version 2>&1
+          $version
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # The overlay port must have dropped these; if they reappear, the
+          # overlay is not being used.
+          if ($version -match 'libarchive|libcurl') { throw "exe still links libarchive or libcurl" }
           # No --tessdata-dir: proves Tesseract finds tessdata\ beside the
           # exe, which is how pdf-mcp's _resolve_tessdata() discovers it.
           $langs = & $exe --list-langs 2>&1
@@ -151,6 +161,35 @@ jobs:
             ""
             "sha256 ``$h``"
           ) >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Scan the package with Microsoft Defender
+        # An unsigned exe downloaded by a background process is the case most
+        # likely to trip Defender's heuristics on users' machines. Update the
+        # signatures, scan the unpacked package and the zip, fail on a find.
+        shell: pwsh
+        run: |
+          $mp = Join-Path $env:ProgramFiles "Windows Defender\MpCmdRun.exe"
+          if (-not (Test-Path $mp)) { throw "Defender command line not found at $mp" }
+          Get-MpComputerStatus | Format-List AMServiceEnabled, AntivirusEnabled, AntivirusSignatureVersion, AMEngineVersion
+          & $mp -SignatureUpdate | Out-Host
+          $status = Get-MpComputerStatus
+          $results = @()
+          foreach ($target in @((Resolve-Path dist\tesseract).Path, (Resolve-Path "dist\$env:ZIP_NAME").Path)) {
+            & $mp -Scan -ScanType 3 -File $target -DisableRemediation | Out-Host
+            $code = $LASTEXITCODE
+            $results += "| ``$(Split-Path $target -Leaf)`` | $code |"
+            # MpCmdRun: 0 = no threat found, 2 = threat found, anything else = scan error.
+            if ($code -eq 2) { throw "Defender flagged $target" }
+            if ($code -ne 0) { throw "Defender scan of $target failed (exit $code)" }
+          }
+          @(
+            "## Defender scan"
+            ""
+            "Signatures $($status.AntivirusSignatureVersion), engine $($status.AMEngineVersion)"
+            ""
+            "| target | MpCmdRun exit (0 = clean) |"
+            "|---|---|"
+          ) + $results >> $env:GITHUB_STEP_SUMMARY
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
